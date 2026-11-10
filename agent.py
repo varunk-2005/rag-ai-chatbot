@@ -52,7 +52,7 @@ class RAGAgent:
         api_key: str,
         vector_store: Optional[RAGVectorStore] = None,
         mcp_manager: Optional[MCPServerManager] = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "gemini-3.6-flash",
         temperature: float = 0.2
     ):
         self.api_key = api_key
@@ -100,12 +100,9 @@ class RAGAgent:
             expr = args.get("expression", "")
             if self.mcp_manager:
                 return self.mcp_manager.execute_tool("eval_math", {"expression": expr})
-            try:
-                import math
-                safe_scope = {k: v for k, v in math.__dict__.items() if not k.startswith("__")}
-                return str(eval(expr, {"__builtins__": {}}, safe_scope))
-            except Exception as e:
-                return f"Calculation error: {str(e)}"
+            # No MCP connection: use the same safe evaluator directly
+            from mcp_server import tool_eval_math
+            return tool_eval_math(expr)
 
         # 4. MCP Tools
         elif self.mcp_manager:
@@ -160,7 +157,7 @@ AVAILABLE TOOLS:
 OPERATIONAL GUIDELINES:
 1. Always consult the uploaded documents first using `search_documents` if the user is asking about uploaded PDFs.
 2. If the user asks for calculations, use `calculator` or `eval_math` rather than guessing numbers.
-3. If the user asks for real-time information or external websites, use relevant MCP tools (e.g. `get_current_datetime` or `fetch_web_url`).
+3. If the user asks for the current date or time, use the MCP tool `get_current_datetime`.
 4. You can perform multiple tool calls across iterations if complex reasoning or cross-referencing is required.
 5. In your final answer, cite your sources accurately (including document names and page numbers).
 
