@@ -8,6 +8,7 @@ Provides:
 """
 
 import json
+import select
 import subprocess
 import threading
 import sys
@@ -41,7 +42,8 @@ class StdioMCPClient:
                 full_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                # Discard server stderr: an unread pipe can fill up and block the server
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
                 cwd=self.cwd,
@@ -108,7 +110,11 @@ class StdioMCPClient:
                 self.process.stdin.write(json_str)
                 self.process.stdin.flush()
 
-                # Read response line
+                # Read response line, but never wait longer than `timeout` seconds,
+                # so a stuck server cannot freeze the app
+                ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+                if not ready:
+                    return None
                 raw_line = self.process.stdout.readline()
                 if not raw_line:
                     return None
