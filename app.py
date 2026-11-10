@@ -1,13 +1,12 @@
 """
 Agentic RAG Chatbot with Model Context Protocol (MCP) Support.
-Built with Streamlit, Google Gemini, and Anthropic MCP standards.
-Production-ready for Streamlit Community Cloud, Docker, and local deployment.
+Built with Streamlit, Google Gemini, and the Model Context Protocol (MCP).
+Runs locally or on Streamlit Community Cloud.
 """
 
 import os
 import sys
 import json
-import base64
 import pandas as pd
 from datetime import datetime
 import streamlit as st
@@ -16,7 +15,7 @@ from dotenv import load_dotenv
 # Internal modular imports
 from rag_engine import extract_text_from_pdfs, chunk_documents, RAGVectorStore
 from mcp_client import MCPServerManager
-from agent import RAGAgent, AgentStep
+from agent import RAGAgent
 
 # Load local environment variables if present
 load_dotenv()
@@ -129,18 +128,14 @@ with st.sidebar:
     st.subheader("🧠 Model Settings")
     selected_model = st.selectbox(
         "Gemini Model",
-        options=["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+        options=["gemini-3.6-flash"],
         index=0,
-        help="gemini-2.0-flash is recommended for speed and tool-calling capabilities."
+        help="Model used by the agent for reasoning and tool calls."
     )
 
-    embedding_type = st.radio(
-        "Embedding Provider",
-        options=["Google Generative AI (Zero RAM)", "Local HuggingFace"],
-        index=0,
-        help="Google Generative AI embeddings are cloud-friendly and prevent memory crashes on Streamlit Cloud."
-    )
-    provider_key = "gemini" if "Google" in embedding_type else "huggingface"
+    # Embeddings are computed with the Gemini embedding API (see rag_engine.py)
+    provider_key = "gemini"
+    st.caption("Embeddings: Gemini embedding API")
 
     st.divider()
 
@@ -298,7 +293,9 @@ if user_query:
             try:
                 agent_generator = agent.run_agent_loop(
                     user_message=user_query,
-                    conversation_history=st.session_state.messages
+                    # Exclude the message just appended, so the current
+                    # question is not sent twice (history + request)
+                    conversation_history=st.session_state.messages[:-1]
                 )
 
                 for step in agent_generator:
