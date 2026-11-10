@@ -1,133 +1,179 @@
-# RAG PDF Chatbot
+# 🤖 Agentic RAG Assistant with Model Context Protocol (MCP)
 
-A retrieval-augmented question-answering app built with **Python**, **Streamlit**, **FAISS** and **Google Gemini**. Upload one or more PDFs, and ask questions about them. Answers are generated only from the passages retrieved from your documents, and the model is told to say so when the answer is not there.
+An intelligent, multi-step **AI Research Agent** built with **Streamlit**, **Google Gemini**, and the open **Model Context Protocol (MCP)** standard.
 
-## Features
+Unlike traditional passive RAG pipelines that only retrieve chunks once, this application transforms RAG into an autonomous **Agent**:
+- **Autonomous Reasoning (ReAct)**: Plans multi-step problem solving, decides when to search documents, summarizes, or executes external tools.
+- **Model Context Protocol (MCP) Client**: Dynamically connects to MCP servers to execute external tools (web scraping, real-time datetime, math computation, system diagnostics).
+- **RAG as an MCP Server**: Exposes the PDF knowledge base as a standalone MCP server (`mcp_rag_server.py`) so external clients (Claude Desktop, Cursor, Antigravity) can query your documents.
+- **Streamlit Deployable**: Optimized for Streamlit Community Cloud, Docker, and Render. Defaults to Google Generative AI Embeddings (`models/text-embedding-004`) to eliminate PyTorch memory overhead and prevent Cloud OOM (Error 137) crashes.
 
-- **Multi-PDF upload:** several PDFs are combined into one searchable index.
-- **Local embeddings:** text is embedded on your machine with `all-MiniLM-L6-v2`, so only the final answer step calls an external API.
-- **FAISS vector search:** the 4 most similar chunks are retrieved for each question.
-- **Grounded answers:** the prompt restricts Gemini to the retrieved context and asks it to reply "answer is not available in the context" otherwise.
-- **Chat history:** the latest exchange is shown first, with earlier messages, timestamps and source file names below.
-- **CSV export:** download the whole conversation from the sidebar.
-- **Controls:** remove the last exchange, or reset the chat and the index.
-- **Rate-limit handling:** a Gemini quota error shows a friendly message instead of crashing.
+---
 
-## How It Works
+## 🏗️ Architecture
 
 ```
-   INDEXING (once per upload)                 ANSWERING (every question)
-
-   PDF files                                  User question
-       │                                           │
-       ▼                                           ▼
-   PyPDF2: extract text                       Embed question (MiniLM)
-       │                                           │
-       ▼                                           ▼
-   Split into chunks                          FAISS similarity search
-   (1,000 chars, 100 overlap)                 (top 4 chunks)
-       │                                           │
-       ▼                                           ▼
-   Embed chunks (MiniLM, 384-dim)             Build prompt: context + question
-       │                                           │
-       ▼                                           ▼
-   FAISS index (in session memory) ─────────► Gemini 2.5 Flash ──► Answer
+                                  ┌───────────────────────────┐
+                                  │      Streamlit UI         │
+                                  │ (Chat, Controls, Status)  │
+                                  └─────────────┬─────────────┘
+                                                │
+                                                ▼
+                                  ┌───────────────────────────┐
+                                  │      RAG AI Agent         │
+                                  │   (ReAct Reasoning Loop)  │
+                                  └──────┬─────────────┬──────┘
+                                         │             │
+                    ┌────────────────────┘             └───────────────────┐
+                    ▼                                                      ▼
+     ┌─────────────────────────────┐                        ┌─────────────────────────────┐
+     │      PDF RAG Engine         │                        │      MCP Client Manager     │
+     │  (Chunking, Embedding,      │                        │  (JSON-RPC 2.0 over Stdio)  │
+     │   Vector Similarity Search) │                        └──────────────┬──────────────┘
+     └─────────────────────────────┘                                       │
+                                                ┌──────────────────────────┴──────────────────────────┐
+                                                ▼                                                     ▼
+                                 ┌─────────────────────────────┐                       ┌─────────────────────────────┐
+                                 │   Built-in MCP Server       │                       │    External MCP Servers     │
+                                 │ - fetch_web_url             │                       │  (Brave Search, GitHub,     │
+                                 │ - get_current_datetime      │                       │   PostgreSQL, Filesystem)   │
+                                 │ - eval_math                 │                       └─────────────────────────────┘
+                                 │ - system_info               │
+                                 └─────────────────────────────┘
 ```
 
-| Step | Function | What it does |
-|---|---|---|
-| Extract | `get_pdf_text` | Reads every page of every uploaded PDF with PyPDF2 and joins the text. |
-| Chunk | `get_text_chunks` | Splits the text with `RecursiveCharacterTextSplitter` (chunk size 1,000, overlap 100). |
-| Index | `build_vector_store` | Embeds the chunks with `sentence-transformers/all-MiniLM-L6-v2` and stores them in FAISS. |
-| Retrieve and answer | `get_answer` | Finds the 4 nearest chunks, puts them in the prompt, and calls `gemini-2.5-flash`. |
-| Display | `render_chat_history` | Renders the latest exchange and the earlier messages. |
+---
 
-## Tech Stack
+## ✨ Features
 
-| Layer | Technology |
-|---|---|
-| UI | Streamlit |
-| PDF parsing | PyPDF2 |
-| Chunking | LangChain text splitters |
-| Embeddings | sentence-transformers (`all-MiniLM-L6-v2`), run locally |
-| Vector store | FAISS (CPU) |
-| LLM | Google Gemini 2.5 Flash (`google-generativeai`) |
-| Language | Python 3.10+ |
+- **Multi-Step Agent Reasoning**: Breaks complex questions into iterative reasoning steps (`Thought -> Action -> Observation -> Final Answer`).
+- **Interactive Step Visualizer**: Watch the agent think and use tools in real-time inside expandable `st.status` drawers.
+- **Model Context Protocol (MCP) Integration**:
+  - Connects to any standard MCP server over stdio.
+  - Auto-discovers tool schemas and registers them for LLM function calling.
+  - Includes a built-in reference MCP server with 4 active tools.
+- **RAG MCP Server**: Includes `mcp_rag_server.py` to allow external tools (Claude Desktop, Cursor) to search your uploaded PDF index.
+- **Zero-RAM Cloud Embeddings**: Uses Google's `models/text-embedding-004` to avoid the 1GB RAM limit on Streamlit Community Cloud.
+- **Multiple Gemini Models**: Switch seamlessly between `gemini-2.0-flash`, `gemini-1.5-flash`, and `gemini-1.5-pro`.
+- **Export & History**: Download full conversations and citations in CSV format.
 
-## Getting Started
+---
 
-### Prerequisites
+## 🚀 Quickstart (Local)
 
-- Python 3.10 or newer
-- A Gemini API key from [Google AI Studio](https://aistudio.google.com/)
-
-### Installation
-
+### 1. Clone & Install Dependencies
 ```bash
-git clone https://github.com/varunk-2005/rag-ai-chatbot.git
-cd rag-ai-chatbot/ai-chatbot-main
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+cd ai-chatbot-main
 pip install -r requirements.txt
 ```
 
-The first run downloads the embedding model (about 90 MB).
-
-### Configuration
-
-Create a `.env` file next to `app.py`:
-
-```env
-GOOGLE_API_KEY=your_gemini_api_key
+### 2. Configure Your API Key
+Create a `.env` file from the template:
+```bash
+cp .env.example .env
 ```
+Add your free Google Gemini API key:
+```env
+GOOGLE_API_KEY=your_gemini_api_key_here
+```
+*(You can get a free Gemini API key from [Google AI Studio](https://aistudio.google.com/)).*
 
-On Streamlit Community Cloud, add the same key under *App settings → Secrets*.
-
-### Run
-
+### 3. Run the Streamlit Application
 ```bash
 streamlit run app.py
 ```
+Open your browser at `http://localhost:8501`.
 
-The app opens at `http://localhost:8501`.
+---
 
-### Usage
+## ☁️ Deploying to Streamlit Community Cloud (1-Click)
 
-1. Upload one or more PDFs in the sidebar.
-2. Click **Submit & Process** and wait for "Ready".
-3. Type a question in the chat box.
-4. Use **Clear last** or **Reset** in the sidebar, or download the history as CSV.
+1. Push your repository to **GitHub**.
+2. Go to [share.streamlit.io](https://share.streamlit.io/) and click **New App**.
+3. Select your repository, branch (`main`), and set the main file path to:
+   ```text
+   app.py
+   ```
+4. In **Advanced Settings**, add your secret:
+   ```toml
+   GOOGLE_API_KEY = "your_actual_gemini_api_key"
+   ```
+5. Click **Deploy!** Your agentic chatbot is live with zero configuration needed.
 
-A `sample.pdf` is included for a quick test.
+---
 
-## Project Structure
+## 🔌 Model Context Protocol (MCP) Guide
 
+### Built-in MCP Tools
+The application comes pre-packaged with a local MCP server (`mcp_server.py`) offering:
+- `fetch_web_url`: Scrapes and extracts readable text from any web URL.
+- `get_current_datetime`: Injects live date, UTC, and local time into the agent context.
+- `eval_math`: Computes expressions safely using Python's `math` engine.
+- `system_info`: Inspects host OS and environment information.
+
+### Adding External MCP Servers
+You can register additional MCP servers in `mcp_servers.json`:
+```json
+{
+  "mcpServers": {
+    "builtin_tools": {
+      "command": "python3",
+      "args": ["mcp_server.py"]
+    },
+    "custom_node_server": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"]
+    }
+  }
+}
 ```
-rag-ai-chatbot/
-└── ai-chatbot-main/
-    ├── app.py              # Whole app: ingestion, retrieval, generation, UI
-    ├── requirements.txt
-    ├── sample.pdf          # Example document
-    └── .gitignore
+
+### Using the PDF RAG as an MCP Server in Claude Desktop / Cursor
+You can expose this project's PDF knowledge base to Claude Desktop or Cursor!
+Add this to your `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "rag-documents": {
+      "command": "python3",
+      "args": ["/path/to/ai-chatbot-main/mcp_rag_server.py"],
+      "env": {
+        "GOOGLE_API_KEY": "your_api_key"
+      }
+    }
+  }
+}
 ```
 
-## Design Decisions
+---
 
-- **Local embeddings, hosted generation.** Embedding runs on the user's machine at no cost, and only the 4 retrieved chunks are sent to Gemini. This keeps API usage low and avoids sending whole documents out.
-- **Chunk size 1,000 with 100 overlap.** Large enough to keep a paragraph's meaning together, with overlap so a sentence cut at a boundary still appears whole in one chunk.
-- **Index built on button click, not on every rerun.** Streamlit reruns the script on each interaction; building the index only on **Submit & Process** and keeping it in `st.session_state` avoids re-embedding the documents for every question.
-- **Explicit "not in context" instruction.** The prompt tells the model to decline instead of guessing, which reduces hallucinated answers.
+## 🐳 Docker Deployment
 
-## Limitations and Future Improvements
+To run in Docker (Render, Cloud Run, AWS, Hugging Face Spaces):
 
-- **No source citations.** Answers do not show which page or chunk they came from. Next step: keep page numbers as chunk metadata and display them.
-- **Each question is answered on its own.** Earlier turns are displayed but not used, so follow-ups like "explain that further" do not work. Next step: rewrite follow-ups into standalone questions.
-- **The index lives in session memory.** It is lost on refresh. Next step: save and load the FAISS index from disk.
-- **Text-only PDFs.** Scanned PDFs need OCR, and tables and images are not handled.
-- **No evaluation set or automated tests yet.** Next step: a small question set with expected answers, including questions that are not in the document, to measure answer and refusal accuracy.
-- **Chat messages are rendered as raw HTML.** User input and model output should be escaped, or rendered with `st.chat_message`, before this is deployed publicly.
-- **Dependencies are not pinned** in `requirements.txt`.
+```bash
+docker build -t rag-ai-agent .
+docker run -p 8501:8501 -e GOOGLE_API_KEY="your_api_key" rag-ai-agent
+```
 
-## Author
+---
 
-**Varun Kumar** · [GitHub](https://github.com/varunk-2005)
+## 📂 Project Structure
+
+```text
+ai-chatbot-main/
+├── .streamlit/
+│   └── config.toml           # Streamlit theme & server configuration
+├── app.py                    # Streamlit UI & Chat frontend
+├── agent.py                  # Multi-step ReAct Agent & tool dispatcher
+├── rag_engine.py             # PDF text extraction, chunking, embeddings & vector store
+├── mcp_client.py             # JSON-RPC 2.0 MCP Client implementation
+├── mcp_server.py             # Reference MCP Server (web fetch, math, datetime)
+├── mcp_rag_server.py         # Exposes PDF RAG as an MCP Server to external tools
+├── mcp_servers.json          # MCP Server definitions
+├── sample.pdf                # Sample test document
+├── requirements.txt          # Production-ready dependencies
+├── Dockerfile                # Production Docker container
+├── .env.example              # Environment variables template
+└── README.md                 # Full documentation
+```

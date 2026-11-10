@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.python-version
+
+# Environments
+.env
+.env.*
+env/
+venv/
+.venv/
+myenv/
+
+# Caches & tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+coverage.xml
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# Project-specific artifacts
+faiss_index/
+logs/
+*.log

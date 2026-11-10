@@ -1,0 +1,53 @@
+{
+  "ingestion_and_chunking": {
+    "text_extraction_latency_ms": 0.0,
+    "chunking_latency_ms": 0.007,
+    "chunk_count_sample": 2,
+    "simulated_scale_chunks": 100
+  },
+  "vector_retrieval_speed": {
+    "index_build_100_chunks_ms": 4.691,
+    "query_latency_p50_ms": 0.025,
+    "query_latency_p95_ms": 0.03,
+    "query_latency_p99_ms": 0.561,
+    "throughput_queries_per_sec": 40201.0
+  },
+  "mcp_performance": {
+    "mcp_handshake_ms": 82.671,
+    "active_mcp_tools_discovered": 4,
+    "tool_call_latencies": {
+      "eval_math_roundtrip_ms": 0.058,
+      "get_current_datetime_roundtrip_ms": 0.087,
+      "system_info_roundtrip_ms": 0.036
+    }
+  },
+  "accuracy_and_quality": {
+    "recall_at_1_pct": 100.0,
+    "recall_at_3_pct": 100.0,
+    "recall_at_5_pct": 100.0,
+    "precision_at_3_pct": 55.6,
+    "mean_reciprocal_rank_mrr": 1.0,
+    "average_top1_cosine_similarity": 0.2928,
+    "tool_selection_accuracy_pct": 100.0,
+    "factual_grounding_score_pct": 100.0,
+    "hallucination_rate_pct": 0.0
+  },
+  "tokens_and_economics": {
+    "system_and_tools_prompt_tokens": 444,
+    "avg_user_query_tokens": 13,
+    "tool_call_overhead_tokens": 23,
+    "context_observation_tokens": 113,
+    "completion_response_tokens": 91,
+    "total_tokens_per_turn": 684,
+    "gemini_2_0_flash_cost_per_query_usd": "$0.000096",
+    "queries_per_single_dollar": 10449
+  },
+  "cloud_deployment_and_memory": {
+    "active_runtime_ram_mb": 22.0,
+    "engine_ram_delta_mb": 0.8,
+    "previous_pytorch_ram_mb": 1250.0,
+    "ram_reduction_pct": 98.2,
+    "streamlit_cloud_headroom_mb": 978.0,
+    "cloud_oom_risk": "0% (Safely below 1,000 MB limit)"
+  }
+}

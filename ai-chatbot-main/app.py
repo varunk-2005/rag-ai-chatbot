@@ -1,209 +1,332 @@
-import streamlit as st
-from PyPDF2 import PdfReader
-import pandas as pd
-import base64
+"""
+Agentic RAG Chatbot with Model Context Protocol (MCP) Support.
+Built with Streamlit, Google Gemini, and Anthropic MCP standards.
+Production-ready for Streamlit Community Cloud, Docker, and local deployment.
+"""
+
 import os
-
-from dotenv import load_dotenv
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-import google.generativeai as genai
-
+import sys
+import json
+import base64
+import pandas as pd
 from datetime import datetime
+import streamlit as st
+from dotenv import load_dotenv
 
-# ---- Load API Key ----
+# Internal modular imports
+from rag_engine import extract_text_from_pdfs, chunk_documents, RAGVectorStore
+from mcp_client import MCPServerManager
+from agent import RAGAgent, AgentStep
+
+# Load local environment variables if present
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets.get("GOOGLE_API_KEY", None)
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Agentic RAG + MCP Assistant",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for polished interface
+st.markdown("""
+<style>
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+        color: #1E88E5;
+    }
+    .sub-title {
+        font-size: 1.05rem;
+        color: #718096;
+        margin-bottom: 1.5rem;
+    }
+    .badge-mcp {
+        background-color: #4A148C;
+        color: #E1BEE7;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-left: 6px;
+    }
+    .badge-rag {
+        background-color: #0D47A1;
+        color: #BBDEFB;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-left: 6px;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""
-    return text
+# --- Session State Initialization ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
+if "document_stats" not in st.session_state:
+    st.session_state.document_stats = {}
+
+if "mcp_manager" not in st.session_state:
+    manager = MCPServerManager()
+    # Auto-register built-in MCP server
+    builtin_server_path = os.path.join(os.path.dirname(__file__), "mcp_server.py")
+    if os.path.exists(builtin_server_path):
+        manager.register_server("builtin_tools", sys.executable, [builtin_server_path])
+    st.session_state.mcp_manager = manager
 
 
-def get_text_chunks(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    return splitter.split_text(text)
-
-
-def build_vector_store(text_chunks):
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    st.session_state.vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-
-
-def get_answer(user_question, api_key):
-    docs = st.session_state.vector_store.similarity_search(user_question)
-    context = "\n\n".join([doc.page_content for doc in docs])
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    prompt = f"""Answer the question as detailed as possible from the provided context.
-If the answer is not in the context, say "answer is not available in the context". Do not hallucinate.
-
-Context:
-{context}
-
-Question:
-{user_question}
-
-Answer:"""
+# --- Helper: API Key Discovery ---
+def get_api_key():
+    # 1. User manual input from sidebar
+    if st.session_state.get("user_api_key"):
+        return st.session_state.user_api_key.strip()
+    # 2. Streamlit Cloud secrets
     try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        if "ResourceExhausted" in str(type(e)):
-            return "⚠️ Gemini API rate limit hit. Please wait 60 seconds and try again."
-        return f"⚠️ Error: {str(e)}"
+        if "GOOGLE_API_KEY" in st.secrets:
+            return st.secrets["GOOGLE_API_KEY"]
+    except Exception:
+        pass
+    # 3. Environment variable (.env or system)
+    return os.getenv("GOOGLE_API_KEY", "")
 
-# Extracted rendering logic so it persists on screen
-def render_chat_history():
-    if not st.session_state.conversation_history:
-        return
-        
-    st.markdown("""
-        <style>
-            .section-title { font-weight: 600; font-size: 1rem; opacity: 0.85; margin: 0.25rem 0 0.5rem 0; }
-            .chat-wrap { max-width: 900px; margin: 0 auto; }
-            .chat-message {
-                padding: 1rem 1.25rem; border-radius: 14px; margin: 0.5rem 0 1rem 0;
-                display: flex; gap: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-                border: 1px solid rgba(255,255,255,0.06);
-            }
-            .chat-message.user { background: linear-gradient(180deg, #2f3542 0%, #2a2f3a 100%); }
-            .chat-message.bot  { background: linear-gradient(180deg, #3c4456 0%, #353d4d 100%); }
-            .chat-message .avatar { flex: 0 0 52px; }
-            .chat-message .avatar img { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; }
-            .chat-message .message { flex: 1; color: #f7f7f7; line-height: 1.55; }
-            .chat-message .meta { font-size: 0.8rem; opacity: 0.75; margin-top: 0.35rem; }
-            hr.clean { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 0.75rem 0 1rem; }
-            .sidebar-note { font-size: 0.9rem; opacity: 0.8; }
-        </style>
-    """, unsafe_allow_html=True)
 
-    st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
+api_key = get_api_key()
+
+
+# --- Sidebar Navigation & Controls ---
+with st.sidebar:
+    st.title("⚙️ Control Panel")
     
-    # Render Latest Exchange
-    latest = st.session_state.conversation_history[-1]
-    st.markdown('<div class="section-title">Latest exchange</div>', unsafe_allow_html=True)
-    st.markdown(f"""
-        <div class="chat-message user">
-            <div class="avatar"><img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png"></div>
-            <div class="message">{latest[0]}</div>
-        </div>
-        <div class="chat-message bot">
-            <div class="avatar"><img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp"></div>
-            <div class="message">{latest[1]}</div>
-        </div>
-    """, unsafe_allow_html=True)
-
-    # Render Previous Messages
-    history_to_show = st.session_state.conversation_history[:-1]
-    if history_to_show:
-        st.markdown('<hr class="clean" />', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Previous messages</div>', unsafe_allow_html=True)
-        for question, answer, timestamp, pdf_name in reversed(history_to_show):
-            st.markdown(f"""
-                <div class="chat-message user">
-                    <div class="avatar"><img src="https://i.ibb.co/CKpTnWr/user-icon-2048x2048-ihoxz4vq.png"></div>
-                    <div class="message">{question}
-                        <div class="meta">Asked: {timestamp} · PDFs: {pdf_name}</div>
-                    </div>
-                </div>
-                <div class="chat-message bot">
-                    <div class="avatar"><img src="https://i.ibb.co/wNmYHsx/langchain-logo.webp"></div>
-                    <div class="message">{answer}</div>
-                </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-def main():
-    st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
-    st.title("Chat with multiple PDFs")
-    st.caption("Upload PDFs, then ask questions powered by local embeddings + Gemini.")
-
-    if 'conversation_history' not in st.session_state:
-        st.session_state.conversation_history = []
-    if 'vector_store' not in st.session_state:
-        st.session_state.vector_store = None
-
-    api_key = GOOGLE_API_KEY
+    # 1. API Configuration
+    st.subheader("🔑 Authentication")
     if not api_key:
-        st.sidebar.error("GOOGLE_API_KEY missing. Add it to your .env or Streamlit secrets.")
-        return
-
-    with st.sidebar:
-        st.subheader("Controls")
-        col1, col2 = st.columns(2)
-
-        if col2.button("Reset"):
-            st.session_state.conversation_history = []
-            st.session_state.vector_store = None
+        st.warning("Google Gemini API key required.")
+        input_key = st.text_input("Enter Gemini API Key", type="password", help="Get your API key at https://aistudio.google.com/")
+        if input_key:
+            st.session_state.user_api_key = input_key
             st.rerun()
-
-        if col1.button("Clear last"):
-            if st.session_state.conversation_history:
-                st.session_state.conversation_history.pop()
+    else:
+        st.success("API Key Active 🟢")
+        with st.expander("Change API Key"):
+            new_key = st.text_input("New API Key", type="password")
+            if st.button("Update Key"):
+                st.session_state.user_api_key = new_key
                 st.rerun()
 
-        pdf_docs = st.file_uploader(
-            "Upload PDF files",
-            accept_multiple_files=True,
-            type=["pdf"],
-            help="You can select multiple PDFs at once."
-        )
-        
-        # Moved embedding logic entirely to the button click
-        if st.button("Submit & Process"):
-            if pdf_docs:
-                with st.spinner("Reading PDFs and building index..."):
-                    # Process only once!
-                    raw_text = get_pdf_text(pdf_docs)
-                    text_chunks = get_text_chunks(raw_text)
-                    build_vector_store(text_chunks)
-                st.success("Ready. Ask your question below.")
-            else:
-                st.warning("Please upload PDF files before processing.")
-                
-        # CSV Download Logic
-        if st.session_state.conversation_history:
-            df = pd.DataFrame(
-                st.session_state.conversation_history,
-                columns=["Question", "Answer", "Timestamp", "PDF Name"]
-            )
-            csv = df.to_csv(index=False)
-            b64 = base64.b64encode(csv.encode()).decode()
-            href = f'<a class="sidebar-note" href="data:file/csv;base64,{b64}" download="conversation_history.csv">Download conversation history (CSV)</a>'
-            st.markdown(href, unsafe_allow_html=True)
+    # 2. Model Settings
+    st.subheader("🧠 Model Settings")
+    selected_model = st.selectbox(
+        "Gemini Model",
+        options=["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+        index=0,
+        help="gemini-2.0-flash is recommended for speed and tool-calling capabilities."
+    )
 
-    # Use st.chat_input to prevent the infinite refresh loop
-    user_question = st.chat_input("Your question about the uploaded PDFs")
-    
-    if user_question:
-        if st.session_state.vector_store is None:
-            st.error("Please upload PDFs and click 'Submit & Process' first!")
+    embedding_type = st.radio(
+        "Embedding Provider",
+        options=["Google Generative AI (Zero RAM)", "Local HuggingFace"],
+        index=0,
+        help="Google Generative AI embeddings are cloud-friendly and prevent memory crashes on Streamlit Cloud."
+    )
+    provider_key = "gemini" if "Google" in embedding_type else "huggingface"
+
+    st.divider()
+
+    # 3. PDF Document Management
+    st.subheader("📄 Document Ingestion (RAG)")
+    uploaded_files = st.file_uploader(
+        "Upload PDF files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PDF documents to build the agent knowledge base."
+    )
+
+    if st.button("🚀 Process & Build Index", type="primary", use_container_width=True):
+        if not api_key:
+            st.error("Please provide a Gemini API key first.")
+        elif not uploaded_files:
+            st.warning("Please select at least one PDF file.")
         else:
-            # We ONLY do the thinking and generation here
-            with st.spinner("Thinking..."):
-                response_output = get_answer(user_question, api_key)
+            with st.spinner("Extracting text and chunking documents..."):
+                try:
+                    pages = extract_text_from_pdfs(uploaded_files)
+                    if not pages:
+                        st.error("No extractable text found in uploaded PDFs.")
+                    else:
+                        chunks = chunk_documents(pages)
+                        progress_bar = st.progress(0, text="Initializing Vector Store...")
 
-            pdf_names = ", ".join([pdf.name for pdf in pdf_docs]) if pdf_docs else "Unknown"
-            st.session_state.conversation_history.append((
-                user_question,
-                response_output,
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                pdf_names
-            ))
+                        def update_progress(ratio, text):
+                            progress_bar.progress(int(ratio * 100), text=text)
 
-    # Render UI at the very end so it survives button clicks
-    render_chat_history()
+                        store = RAGVectorStore(api_key=api_key, embedding_provider=provider_key)
+                        store.build_index(chunks, progress_callback=update_progress)
+                        
+                        st.session_state.vector_store = store
+                        st.session_state.document_stats = store.document_stats
+                        progress_bar.empty()
+                        st.success(f"Indexed {len(chunks)} chunks across {len(uploaded_files)} PDF(s)!")
+                except Exception as e:
+                    st.error(f"Error processing PDFs: {str(e)}")
+
+    # Show Document Stats if indexed
+    if st.session_state.vector_store and st.session_state.document_stats:
+        stats = st.session_state.document_stats
+        with st.expander("📊 Document Statistics", expanded=False):
+            st.write(f"**Total Documents:** {stats.get('total_documents', 0)}")
+            st.write(f"**Total Chunks:** {stats.get('total_chunks', 0)}")
+            st.write(f"**Total Words:** ~{stats.get('total_words', 0):,}")
+            st.write("**Files:**")
+            for doc in stats.get("documents", []):
+                st.write(f"- `{doc}`")
+
+    st.divider()
+
+    # 4. Model Context Protocol (MCP) Tools
+    st.subheader("🔌 Model Context Protocol (MCP)")
+    mcp_manager: MCPServerManager = st.session_state.mcp_manager
+    connected_tools = mcp_manager.get_all_tools()
+    
+    st.markdown(f"**Connected MCP Servers:** `{len(mcp_manager.clients)}`")
+    st.markdown(f"**Active MCP Tools:** `{len(connected_tools)}`")
+    
+    with st.expander("Inspect Available MCP Tools", expanded=False):
+        for tool in connected_tools:
+            st.markdown(f"🔧 **`{tool.get('name')}`**")
+            st.caption(tool.get('description', 'No description'))
+
+    st.divider()
+
+    # 5. Conversation Controls & Export
+    st.subheader("💾 Chat Options")
+    col1, col2 = st.columns(2)
+    if col1.button("🗑️ Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    if col2.button("🔄 Reset All", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.vector_store = None
+        st.session_state.document_stats = {}
+        st.rerun()
+
+    if st.session_state.messages:
+        export_data = []
+        for m in st.session_state.messages:
+            export_data.append({
+                "Role": m["role"],
+                "Content": m["content"],
+                "Timestamp": m.get("timestamp", datetime.now().isoformat())
+            })
+        df_export = pd.DataFrame(export_data)
+        csv_bytes = df_export.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Export Chat (CSV)",
+            data=csv_bytes,
+            file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 
-if __name__ == "__main__":
-    main()
+# --- Main Chat Interface ---
+st.markdown('<div class="main-title">🤖 Agentic RAG Assistant <span class="badge-rag">RAG</span><span class="badge-mcp">MCP</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Intelligent AI Agent with Multi-Step Reasoning, PDF Document Retrieval, and Model Context Protocol (MCP) Extensibility.</div>', unsafe_allow_html=True)
+
+# Show helpful onboarding banner if no document is loaded
+if not st.session_state.vector_store:
+    st.info("💡 **Getting Started:** Upload your PDF documents in the sidebar and click **Process & Build Index**. Once ready, you can chat with the Agent. The Agent can also access external tools via Model Context Protocol (MCP)!")
+
+# Render Conversation History
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        # If this assistant message contains reasoning steps, show them in an expander
+        if msg["role"] == "assistant" and msg.get("steps"):
+            with st.expander("🔍 View Agent Reasoning & Tool Steps", expanded=False):
+                for step in msg["steps"]:
+                    st_type = step.get("step_type")
+                    if st_type == "thought":
+                        st.markdown(f"🧠 **Thought:** {step.get('content')}")
+                    elif st_type == "tool_call":
+                        st.markdown(f"🛠️ **Action:** `{step.get('tool_name')}` with arguments: `{json.dumps(step.get('tool_args', {}))}`")
+                    elif st_type == "observation":
+                        st.markdown(f"📋 **Observation:**\n```\n{step.get('content')[:500]}...\n```")
+        st.markdown(msg["content"])
+
+
+# --- Chat Input & Agent Execution Loop ---
+user_query = st.chat_input("Ask a question about your documents, request calculations, or trigger MCP tools...")
+
+if user_query:
+    if not api_key:
+        st.error("Please provide your Google Gemini API Key in the sidebar to chat.")
+    else:
+        # Display user question
+        st.session_state.messages.append({
+            "role": "user",
+            "content": user_query,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        with st.chat_message("user"):
+            st.markdown(user_query)
+
+        # Agent Reasoning & Response
+        with st.chat_message("assistant"):
+            agent = RAGAgent(
+                api_key=api_key,
+                vector_store=st.session_state.vector_store,
+                mcp_manager=st.session_state.mcp_manager,
+                model_name=selected_model
+            )
+
+            status_container = st.status("🤖 Agent is thinking and planning...", expanded=True)
+            step_records = []
+            final_response = ""
+
+            try:
+                agent_generator = agent.run_agent_loop(
+                    user_message=user_query,
+                    conversation_history=st.session_state.messages
+                )
+
+                for step in agent_generator:
+                    step_records.append(step.to_dict())
+                    
+                    if step.step_type == "thought":
+                        status_container.write(f"🧠 **Thought:** {step.content}")
+                    elif step.step_type == "tool_call":
+                        status_container.write(f"🛠️ **Executing Tool:** `{step.tool_name}` with `{json.dumps(step.tool_args)}`")
+                    elif step.step_type == "observation":
+                        preview = (step.content[:180] + "...") if len(step.content) > 180 else step.content
+                        status_container.write(f"📋 **Result:** {preview}")
+                    elif step.step_type == "final":
+                        final_response = step.content
+
+                status_container.update(label="✅ Agent execution complete!", state="complete", expanded=False)
+
+            except Exception as e:
+                status_container.update(label="⚠️ Error during execution", state="error", expanded=False)
+                final_response = f"An error occurred while processing your request: {str(e)}"
+
+            # Render final answer
+            st.markdown(final_response)
+
+            # Store in session state
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": final_response,
+                "steps": step_records,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
