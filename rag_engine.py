@@ -1,9 +1,8 @@
 """
 RAG Engine for PDF Document Ingestion, Chunking, Embeddings, and Retrieval.
 Supports:
-1. Google Gemini Embeddings (models/text-embedding-004) - Recommended, 0 RAM usage.
-2. Local HuggingFace Embeddings (sentence-transformers).
-3. Pure Python TF-IDF Vectorizer fallback (Zero external dependencies).
+1. Google Gemini embeddings (semantic search) - used when an API key is available.
+2. Pure-Python TF-IDF fallback (keyword search) - used when there is no API key.
 """
 
 import os
@@ -38,6 +37,9 @@ try:
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
+
+# Gemini embedding model. Change it here only; it is used for both documents and queries.
+EMBEDDING_MODEL = "models/gemini-embedding-2"
 
 
 class DocumentChunk:
@@ -195,8 +197,8 @@ class PurePythonTFIDF:
 
 class RAGVectorStore:
     """
-    Fast, production-ready vector store for document retrieval.
-    Defaults to Google Gemini Embeddings (models/text-embedding-004) for 0 RAM overhead.
+    In-memory vector store: embeddings are kept in a normalized NumPy matrix
+    and searched with cosine similarity. Uses Gemini embeddings by default.
     """
 
     def __init__(self, api_key: Optional[str] = None, embedding_provider: str = "gemini"):
@@ -208,7 +210,7 @@ class RAGVectorStore:
         self.fallback_tfidf: Optional[PurePythonTFIDF] = None
 
     def _compute_gemini_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Computes embeddings using Google Gemini text-embedding-004 in batches."""
+        """Computes embeddings with the Gemini embedding model, in batches."""
         if not HAS_GENAI:
             raise ImportError("google-generativeai is not installed.")
         
@@ -219,7 +221,7 @@ class RAGVectorStore:
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
             result = genai.embed_content(
-                model="models/text-embedding-004",
+                model=EMBEDDING_MODEL,
                 content=batch,
                 task_type="retrieval_document"
             )
@@ -236,7 +238,7 @@ class RAGVectorStore:
         """Computes a single query embedding."""
         genai.configure(api_key=self.api_key)
         result = genai.embed_content(
-            model="models/text-embedding-004",
+            model=EMBEDDING_MODEL,
             content=query,
             task_type="retrieval_query"
         )
@@ -256,22 +258,10 @@ class RAGVectorStore:
         if self.embedding_provider == "gemini" and self.api_key:
             embeddings = self._compute_gemini_embeddings(texts)
         else:
-            # Check for HuggingFace embeddings
-            use_fallback = True
-            if self.embedding_provider == "huggingface":
-                try:
-                    from langchain_huggingface import HuggingFaceEmbeddings
-                    hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-                    embeddings = hf.embed_documents(texts)
-                    use_fallback = False
-                except Exception:
-                    use_fallback = True
-
-            if use_fallback:
-                # Built-in pure-Python TF-IDF fallback
-                self.fallback_tfidf = PurePythonTFIDF(max_features=256)
-                self.fallback_tfidf.fit(texts)
-                embeddings = self.fallback_tfidf.transform(texts)
+            # No API key: fall back to keyword (TF-IDF) vectors
+            self.fallback_tfidf = PurePythonTFIDF(max_features=256)
+            self.fallback_tfidf.fit(texts)
+            embeddings = self.fallback_tfidf.transform(texts)
 
         for chunk, emb in zip(self.chunks, embeddings):
             chunk.embedding = emb
@@ -294,7 +284,7 @@ class RAGVectorStore:
             progress_callback(1.0, "Vector store index ready!")
 
     def similarity_search(self, query: str, top_k: int = 4) -> List[Dict[str, Any]]:
-        """Performs semantic similarity search for a query and returns top_k matching chunks with scores."""
+        """Embeds the query, runs cosine similarity search and returns top_k matching chunks with scores."""
         if self.embeddings_matrix is None or not self.chunks:
             return []
 
@@ -303,12 +293,7 @@ class RAGVectorStore:
         elif self.fallback_tfidf is not None:
             query_emb = self.fallback_tfidf.transform([query])[0]
         else:
-            try:
-                from langchain_huggingface import HuggingFaceEmbeddings
-                hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-                query_emb = hf.embed_query(query)
-            except Exception:
-                return []
+            return []
 
         q_vec = np.array(query_emb, dtype=np.float32)
         q_norm = np.linalg.norm(q_vec)
