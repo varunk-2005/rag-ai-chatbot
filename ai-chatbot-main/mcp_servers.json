@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "builtin_tools": {
-      "command": "python3",
-      "args": ["mcp_server.py"],
-      "description": "Built-in MCP tools for web scraping, datetime, mathematical evaluations, and system specs."
-    }
-  }
-}
