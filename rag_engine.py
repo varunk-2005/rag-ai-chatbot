@@ -1,5 +1,7 @@
 """
 RAG Engine for PDF Document Ingestion, Chunking, Embeddings, and Retrieval.
+Tables are read with pdfplumber and rewritten row by row, so each value keeps
+its row and column labels (see table_to_text).
 Supports:
 1. Google Gemini embeddings (semantic search) - used when an API key is available.
 2. Pure-Python TF-IDF fallback (keyword search) - used when there is no API key.
@@ -23,6 +25,13 @@ except ImportError:
         PDF_READER_CLS = PyPDF2.PdfReader
     except ImportError:
         PDF_READER_CLS = None
+
+# Optional table-aware PDF parser (used for pages that contain tables)
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
 
 # Optional LangChain text splitter
 try:
@@ -58,50 +67,159 @@ class DocumentChunk:
         }
 
 
+def _clean_cell(cell: Any) -> str:
+    """Flattens a table cell to one line of text."""
+    return " ".join(str(cell or "").split())
+
+
+def table_to_text(table: List[List[Any]]) -> str:
+    """
+    Converts one extracted table into self-contained text, one paragraph per row.
+
+    Plain text extraction reads a table as one long stream, so a cell loses its
+    row and column labels. Here every row is rewritten so that each value is
+    stated together with the labels it belongs to.
+
+    Two layouts are handled:
+    1. Grid (matrix) tables: a header row, then a second header row whose first
+       cells are empty (for example dates on row 1 and time slots on row 2),
+       with row labels in the leading columns. Each non-empty cell becomes
+       "<column header> <sub-header>: <cell>" under its row labels.
+    2. Record tables: one header row, one record per row. Each row becomes
+       "<header>: <value>; <header>: <value>; ...".
+    """
+    rows = [[_clean_cell(c) for c in row] for row in table if row]
+    rows = [r for r in rows if any(r)]
+    if len(rows) < 2:
+        return ""
+
+    header = rows[0]
+    second = rows[1]
+    # Leading empty cells in the second row mean it is a sub-header, and tell us
+    # how many leading columns are row labels.
+    n_labels = 0
+    for cell in second:
+        if cell:
+            break
+        n_labels += 1
+    is_grid = 0 < n_labels < len(header) and len(rows) > 2
+
+    paragraphs = []
+    if is_grid:
+        last_labels = [""] * n_labels
+        for row in rows[2:]:
+            # Merged cells come out empty: carry the label down from the row above
+            labels = []
+            for i in range(n_labels):
+                if row[i]:
+                    last_labels[i] = row[i]
+                    for j in range(i + 1, n_labels):
+                        last_labels[j] = ""
+                labels.append(last_labels[i])
+            entries = []
+            for col in range(n_labels, min(len(row), len(header))):
+                if row[col]:
+                    column = " ".join(x for x in (header[col], second[col]) if x)
+                    entries.append(f"{column}: {row[col]}")
+            if entries:
+                title = ", ".join(x for x in labels if x)
+                paragraphs.append(f"{title}\n" + "\n".join(f"- {e}" for e in entries))
+    else:
+        for row in rows[1:]:
+            pairs = [f"{h}: {v}" for h, v in zip(header, row) if v]
+            if pairs:
+                paragraphs.append("; ".join(pairs))
+
+    return "\n\n".join(paragraphs)
+
+
+def _extract_page_texts(source: Any) -> List[Dict[str, Any]]:
+    """
+    Returns one dict per page of a PDF: {"text": ..., "is_table": bool}.
+    Pages with tables are converted with table_to_text(); other pages use
+    plain text extraction.
+    """
+    if HAS_PDFPLUMBER:
+        pages = []
+        with pdfplumber.open(source) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                table_text = "\n\n".join(t for t in (table_to_text(tb) for tb in tables) if t)
+                if table_text:
+                    pages.append({"text": table_text, "is_table": True})
+                else:
+                    pages.append({"text": page.extract_text() or "", "is_table": False})
+        return pages
+
+    if PDF_READER_CLS is None:
+        raise ImportError("Install 'pdfplumber' or 'pypdf' to read PDF files.")
+    reader = PDF_READER_CLS(source)
+    return [{"text": page.extract_text() or "", "is_table": False} for page in reader.pages]
+
+
 def extract_text_from_pdfs(pdf_files: List[Any]) -> List[Dict[str, Any]]:
     """
     Extracts text page-by-page from uploaded PDF files (or file paths).
     Returns a list of page dicts: [{'text': ..., 'source': filename, 'page': 1}, ...]
     """
-    if PDF_READER_CLS is None:
-        raise ImportError("Neither 'pypdf' nor 'PyPDF2' is installed. Please install 'pypdf'.")
-
     pages_data = []
 
     for pdf_file in pdf_files:
-        filename = getattr(pdf_file, "name", str(pdf_file))
-        
-        # If it's a file path or string
         if isinstance(pdf_file, str):
+            # A file path
+            filename = os.path.basename(pdf_file)
             with open(pdf_file, "rb") as f:
-                reader = PDF_READER_CLS(f)
-                num_pages = len(reader.pages)
-                for page_idx in range(num_pages):
-                    page = reader.pages[page_idx]
-                    text = page.extract_text() or ""
-                    if text.strip():
-                        pages_data.append({
-                            "text": text.strip(),
-                            "source": os.path.basename(filename),
-                            "page": page_idx + 1
-                        })
+                page_texts = _extract_page_texts(io.BytesIO(f.read()))
         else:
             # Streamlit UploadedFile (file-like object)
+            filename = getattr(pdf_file, "name", str(pdf_file))
             pdf_bytes = io.BytesIO(pdf_file.read())
             pdf_file.seek(0)
-            reader = PDF_READER_CLS(pdf_bytes)
-            num_pages = len(reader.pages)
-            for page_idx in range(num_pages):
-                page = reader.pages[page_idx]
-                text = page.extract_text() or ""
-                if text.strip():
-                    pages_data.append({
-                        "text": text.strip(),
-                        "source": filename,
-                        "page": page_idx + 1
-                    })
+            page_texts = _extract_page_texts(pdf_bytes)
+
+        for page_idx, page in enumerate(page_texts):
+            if page["text"].strip():
+                pages_data.append({
+                    "text": page["text"].strip(),
+                    "source": filename,
+                    "page": page_idx + 1,
+                    "is_table": page["is_table"]
+                })
 
     return pages_data
+
+
+def _chunk_table_text(text: str, chunk_size: int) -> List[str]:
+    """
+    Chunks text produced by table_to_text().
+    - A grid row (a title line followed by "- " entries) is one chunk. If it is
+      longer than chunk_size it is split, and the title is repeated in each piece.
+    - Record rows (one line each) are packed together up to chunk_size.
+    """
+    segments: List[str] = []
+    packed = ""
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            continue
+        lines = para.split("\n")
+        if len(lines) > 1:
+            title, entries = lines[0], lines[1:]
+            piece = title
+            for entry in entries:
+                if len(piece) + len(entry) + 1 > chunk_size and piece != title:
+                    segments.append(piece)
+                    piece = title
+                piece += "\n" + entry
+            segments.append(piece)
+        else:
+            if packed and len(packed) + len(para) + 1 > chunk_size:
+                segments.append(packed)
+                packed = ""
+            packed = f"{packed}\n{para}" if packed else para
+    if packed:
+        segments.append(packed)
+    return segments
 
 
 def chunk_documents(pages_data: List[Dict[str, Any]], chunk_size: int = 1000, chunk_overlap: int = 150) -> List[DocumentChunk]:
@@ -110,6 +228,18 @@ def chunk_documents(pages_data: List[Dict[str, Any]], chunk_size: int = 1000, ch
     """
     chunks: List[DocumentChunk] = []
     chunk_counter = 0
+
+    # Table pages: keep each table row whole so its labels stay with its values
+    table_pages = [p for p in pages_data if p.get("is_table")]
+    pages_data = [p for p in pages_data if not p.get("is_table")]
+    for item in table_pages:
+        for segment in _chunk_table_text(item["text"], chunk_size):
+            chunks.append(DocumentChunk(
+                text=segment,
+                metadata={"source": item["source"], "page": item["page"]},
+                chunk_id=chunk_counter
+            ))
+            chunk_counter += 1
 
     if HAS_LANGCHAIN_SPLITTER:
         splitter = RecursiveCharacterTextSplitter(
