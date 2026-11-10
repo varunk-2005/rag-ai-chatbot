@@ -4,7 +4,6 @@ Implements the MCP JSON-RPC 2.0 specification over Stdio.
 Can run standalone or be managed automatically by the Streamlit Agent.
 
 Tools exposed:
-- fetch_web_url: Fetches and cleans textual content from a webpage.
 - get_current_datetime: Returns real-world date and time.
 - eval_math: Safely computes mathematical expressions.
 - system_info: Returns runtime and OS metadata.
@@ -12,38 +11,11 @@ Tools exposed:
 
 import sys
 import json
+import ast
 import math
+import operator
 import platform
-import urllib.request
-import re
 from datetime import datetime, timezone
-
-
-def clean_html(raw_html: str) -> str:
-    """Strips script, style tags and converts HTML to clean readable text."""
-    text = re.sub(r'<(script|style)\b[^>]*>[\s\S]*?<\/\1>', '', raw_html, flags=re.IGNORECASE)
-    text = re.sub(r'<(br|p|div|li|tr)[^>]*>', '\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    return text.strip()
-
-
-def tool_fetch_web_url(url: str, max_chars: int = 4000) -> str:
-    """Fetches a URL and returns clean readable text."""
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; RAG-Agent-MCP/1.0)"}
-        )
-        with urllib.request.urlopen(req, timeout=8) as response:
-            html = response.read().decode('utf-8', errors='replace')
-            cleaned = clean_html(html)
-            if len(cleaned) > max_chars:
-                cleaned = cleaned[:max_chars] + f"\n... [Truncated to {max_chars} chars]"
-            return f"Source URL: {url}\n\nContent:\n{cleaned}"
-    except Exception as e:
-        return f"Failed to fetch URL '{url}': {str(e)}"
 
 
 def tool_get_current_datetime() -> str:
@@ -57,25 +29,52 @@ def tool_get_current_datetime() -> str:
     )
 
 
+# Operators and names the calculator accepts. Anything else is rejected.
+_BIN_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+}
+_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+_FUNCTIONS = {
+    name: getattr(math, name)
+    for name in ("sqrt", "log", "log2", "log10", "exp", "sin", "cos", "tan",
+                 "asin", "acos", "atan", "floor", "ceil", "factorial")
+}
+_FUNCTIONS.update({"abs": abs, "round": round, "max": max, "min": min, "pow": pow})
+_CONSTANTS = {"pi": math.pi, "e": math.e}
+
+
+def _eval_node(node):
+    """Evaluates one node of a parsed expression, allowing only arithmetic."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _eval_node(node.left), _eval_node(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+            raise ValueError("exponent too large")
+        return _BIN_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
+    if isinstance(node, ast.Name) and node.id in _CONSTANTS:
+        return _CONSTANTS[node.id]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in _FUNCTIONS and not node.keywords):
+        return _FUNCTIONS[node.func.id](*[_eval_node(arg) for arg in node.args])
+    raise ValueError("only numbers, + - * / // % **, and basic math functions are allowed")
+
+
 def tool_eval_math(expression: str) -> str:
-    """Safely evaluates a math expression using math library functions."""
-    safe_scope = {k: v for k, v in math.__dict__.items() if not k.startswith("__")}
-    safe_scope["math"] = math
-    safe_scope["abs"] = abs
-    safe_scope["round"] = round
-    safe_scope["max"] = max
-    safe_scope["min"] = min
-    safe_scope["pow"] = pow
-    safe_scope["sum"] = sum
-
-    # Disallow dangerous tokens
-    for token in ["__", "import", "open", "exec", "eval", "os", "sys", "subprocess"]:
-        if token in expression:
-            return f"Error: Expression contains forbidden keyword '{token}'"
-
+    """
+    Evaluates a math expression without using eval().
+    The expression is parsed into a syntax tree and only whitelisted
+    operators, functions and constants are executed.
+    """
+    if len(expression) > 200:
+        return "Math Error: expression too long"
     try:
-        result = eval(expression, {"__builtins__": {}}, safe_scope)
-        return str(result)
+        tree = ast.parse(expression.strip(), mode="eval")
+        return str(_eval_node(tree.body))
     except Exception as e:
         return f"Math Error: {str(e)}"
 
@@ -91,17 +90,6 @@ def tool_system_info() -> str:
 
 # MCP Tool Definitions (JSON Schema)
 MCP_TOOLS = [
-    {
-        "name": "fetch_web_url",
-        "description": "Fetches external content from a webpage URL and returns readable text.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "The full HTTP/HTTPS URL to fetch."}
-            },
-            "required": ["url"]
-        }
-    },
     {
         "name": "get_current_datetime",
         "description": "Returns the current real-world date, time, weekday, and UTC time.",
@@ -168,9 +156,7 @@ def handle_request(req: dict) -> dict:
         args = params.get("arguments", {})
 
         output = ""
-        if name == "fetch_web_url":
-            output = tool_fetch_web_url(args.get("url", ""))
-        elif name == "get_current_datetime":
+        if name == "get_current_datetime":
             output = tool_get_current_datetime()
         elif name == "eval_math":
             output = tool_eval_math(args.get("expression", ""))
